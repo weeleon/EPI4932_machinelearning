@@ -1,0 +1,317 @@
+---
+title: "Practical session on supervised machine learning in R"
+author: "Leonard Wee"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+In this homework assignment, the objective is to introduce you to a machine learning framework in R
+that is called "CARET". You will find many books and online tutorials about Caret, and of course
+you are strongly encoraged to look them up and try things out for yourself.
+
+The first part is to get a little but familiar with finding information about CARET and some of the
+terminology used. Next, we will do a little exercise in machine learnign to get you used to something
+called "hyper-parameter tuning".
+
+For this preparatory assignment, you can look at this link : https://topepo.github.io/caret/
+
+### Some study tasks
+
+1. Read the introduction Chapter 1
+2. Read first section of Chapter 5 (section 5.1)
+3. Draw out for yourself (paper or notebook) what are the basic and most typical machine learning "steps"
+4. Be able to loosely describe what is a "split" and what is "pre-processing" and what is a "parameter set".
+
+## Installing the R packages
+
+In the practical, we will of course make use of the CARET package. Additionally, we may find the following
+packages also useful : dplyr, ggplot2 and pROC.
+
+### Preparatory tasks
+
+1. Install caret in your own R application using any method of your choice.
+2. Recommended - also install or update : dplyr, ggplot2 and pROC.
+
+```{r install-packages, include=FALSE}
+#here is a small guidance to help you install CARET if you are using R commands and/or scripting
+#
+install.packages("caret")
+library(caret)
+```
+
+3. Get some play-around data ready.
+
+```{r head-titanic-data, include=FALSE}
+library(caret, dplyr, pROC)
+library(ggplot2)
+library(tidyr)
+library(magrittr)
+
+pathToData <- './' #this line tells R where is your working folder that has this markdown document and the data file
+
+titanic <- read.csv( file.path(pathToData,'titanic4.csv') ) #this is going to read in the data file called titanic3
+
+titanic$sex %<>% as.factor()
+titanic$cabin %<>% as.factor()
+titanic$embarked %<>% as.factor()
+titanic$survived %<>% as.factor()
+
+summary(titanic)
+```
+At this point, those who have already completes Data Exploration and Unsupervised Learning module will have the tools needed to explore this dataset
+if they so wish. You are most welcome to do so, and in fact it would be an excellent idea. However, since not everyone has done the module or have time
+this is left as optional.
+
+
+The next important step we have to do for machine learning is to "split" our data into a subset that we want to build the model with, and another
+separate subset that could be used to "adjust" or tune the machine learning model.
+
+```{r split-titanic-dataset}
+library(caret) #checks that we have it installed
+
+set.seed(999) #if we want to get the same quasi random splits every time
+
+#in machine learning we often divide up the data into a set that will train the machine model
+#and then test it in a set that the machine model has not ever seen yet
+inTrain <- createDataPartition(titanic$survived, p = 0.80, list = F)
+titanic_train <- titanic[ inTrain, ]
+titanic_test <- titanic[ -inTrain, ]
+rm(inTrain)
+```
+
+## Parameter tuning
+
+One of the least clearly defined aspects of supervised machine learning is called "hyper-parameter tuning".
+To be clear, the parameters are normally what we would call covariates, or variables, or factors, in conventional modelling.
+Therefore "hyper-parameters" here are defined as the settings and controls on the machine learning procedure, which can sometimes
+have a profound impact on the kind of model that is produced.
+
+For this coming exercise, you are asked to CHOOSE ONLY ONE from the machine learning models below. You can experiment with a few
+different hyperparameter settings in the machine learning model to see if they have a big effect on the prediction performance of
+the trained model.
+
+### Tasks :
+1. Choose only ONE of the machine learning models below.
+2. Try to look up the background information about this machine learning model in the Caret documentation from above.
+3. Try to describe in just basic simple terms what this machine model is trying to do.
+4. Look up Caret documentation for the model, and see what are the possible "hyper-parameters" of this model?
+5. In your selected model below, look in the markdown notes where I suggest some hyper-parameters you can try out. The fine details are really NOT essential
+for now, what I would ask you to do is to see if changing one of more of these modelling hyper-parameters have an EFFECT ON PERFORMANCE of the final model.
+All you need to note for now is what you changed, and what might have been the effect.
+
+Note : If you have not already done so, I invite you now to refresh your mind about "Receiver Operator Characteristics" (ROC) curve
+and the "Area Under the Curve" (AUC).
+
+Note in the practical we will do together, we will only look at a couple of these in detail, and dig down deeper into what the model is doing.
+
+
+## Logistic regression in machine learning style ("Elastic Net")
+
+In this Elastic Net model, I invite you to try out two very simple hyper-parameters which are to do with how to "split" up the
+dataset into one Training sub-sample and one Validation sub-sample. The hyperparameters here are :
+
+- "number" the number of "folds" in K-fold cross validation
+- "repeats" the number of repeated experiments to be conducted using each "fold"
+
+
+```{r glmnet-titanic-model}
+trainControl <- trainControl(
+  method = "repeatedcv", #repeated internal cross-validation
+  number = 10, #10-fold cross-validation **HYPER PARAMETER
+  repeats = 10, #10 repeats of each fold ** HYPER PARAMETER
+  search = "random",
+  summaryFunction = twoClassSummary,
+  classProbs=TRUE
+  )
+
+model_glmnet <- train(
+  survived ~ . , data = titanic_train,
+  method = "glmnet",
+  trControl = trainControl,
+  verbose = FALSE,
+  tuneLength = 5,
+  metric = "ROC"
+)
+
+model_glmnet
+```
+
+```{r evaluate-glmnet-model}
+probabilitiesSelf <- predict(model_glmnet, titanic_train, type="prob")
+myroc <- pROC::roc(predictor = probabilitiesSelf$surv,
+             response = titanic_train$survived,
+             levels = c("surv","died"), smooth=F)
+
+probabilitiesTest <- predict(model_glmnet, titanic_test, type="prob")
+testroc <- pROC::roc(predictor = probabilitiesTest$surv,
+             response = titanic_test$survived,
+             levels = c("surv","died"), smooth=F)
+
+par(mfrow=c(1,2))
+pROC::plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
+pROC::plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+```
+
+
+## Tree-based classifier (Recursive Partitioning "RPART")
+
+This is one of the simplest models to build and there are actually no tuning parameters to directly steer the tree learning itself.
+I invite you to try out two very simple hyper-parameters which are to do with how to "split" up the dataset into one Training sub-sample
+and one Validation sub-sample. The hyperparameters here are :
+
+- "number" the number of "folds" in K-fold cross validation
+- "repeats" the number of repeated experiments to be conducted using each "fold"
+
+```{r tree-titanic-model}
+trainControl <- trainControl(
+  method = "repeatedcv", #repeated internal cross-validation
+  number = 10, #10-fold cross-validation **HYPERPARAMETER
+  repeats = 10, #10 repeats of each fold **HYPERPARAMETER
+  #search = "random",
+  summaryFunction = twoClassSummary,
+  classProbs=TRUE
+  )
+
+model_rpart <- train(
+  survived ~ . , data = titanic_train,
+  method = "rpart",
+  trControl = trainControl,
+  #verbose = FALSE,
+  #tuneLength = 5
+  metric = "ROC"
+)
+
+library(rpart.plot)
+rpart.plot(model_rpart$finalModel)
+```
+
+
+```{r evaluate-tree-model}
+probabilitiesSelf <- predict(model_rpart, titanic_train, type="prob")
+myroc <- pROC::roc(predictor = probabilitiesSelf$surv,
+             response = titanic_train$survived,
+             levels = c("surv","died"), smooth=F)
+
+probabilitiesTest <- predict(model_rpart, titanic_test, type="prob")
+testroc <- pROC::roc(predictor = probabilitiesTest$surv,
+             response = titanic_test$survived,
+             levels = c("surv","died"), smooth=F)
+
+par(mfrow=c(1,2))
+pROC::plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
+pROC::plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+```
+
+
+## Random forest classifier ("rf")
+
+The random forest classifier here is going to be based on an ensemble of 2000 trees, each with a randomly-picked subset of 5 out of the 8 available variables.
+Here I invite you to experiment with the number of variables in each tree (eg change it from 5) using the hyperparameter below called "mtry".
+Also, you can and should experiment with the number of trees in the forest (eg change it from 2000) using the hyperparameter below called "num.trees".
+
+```{r rf-titanic-model}
+trainControl <- trainControl(
+  method = "repeatedcv", #repeated internal cross-validation
+  number = 10, #10-fold cross-validation
+  repeats = 10, #10 repeats of each fold
+  #search = "random",
+  summaryFunction = twoClassSummary,
+  classProbs=TRUE,
+  allowParallel=TRUE
+  )
+
+tgControl <- expand.grid(
+  .mtry = 5 #**HYPERPARAMETER
+)
+
+model_forest <- train(
+  survived ~ . , data = titanic_train,
+  method = "rf",
+  trControl = trainControl,
+  #verbose = FALSE,
+  #tuneLength = 5
+  metric = "ROC",
+  tuneGrid = tgControl,
+  num.trees = 2000 #**HYPERPARAMETER
+)
+
+model_forest
+```
+
+```{r evaluate-forest-model}
+probabilitiesSelf <- predict(model_forest, titanic_train, type="prob")
+myroc <- pROC::roc(predictor = probabilitiesSelf$surv,
+             response = titanic_train$survived,
+             levels = c("surv","died"), smooth=F)
+
+probabilitiesTest <- predict(model_forest, titanic_test, type="prob")
+testroc <- pROC::roc(predictor = probabilitiesTest$surv,
+             response = titanic_test$survived,
+             levels = c("surv","died"), smooth=F)
+
+par(mfrow=c(1,2))
+pROC::plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
+pROC::plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+```
+
+
+## Support Vector Machine ("SVM")
+
+For this, we have quite some choices to make, and tuning a complex model like this can become a bit obtuse. In this example, we will only use a simple divider function to cut classify into survived and died. With this particular simplified SVM, we can try out two very simple hyper-parameters which are to do with how to "split" up the dataset into one Training sub-sample and one Validation sub-sample. The hyperparameters here are :
+
+- "number" the number of "folds" in K-fold cross validation
+- "repeats" the number of repeated experiments to be conducted using each "fold"
+- "tune length" allows the model to iterate for more attempts to find the best model
+
+```{r svm-titanic-model}
+trainControl <- trainControl(
+  method = "cv", #repeated internal cross-validation
+  number = 10, #10-fold cross-validation
+  #repeats = 10, #10 repeats of each fold
+  search = "random",
+  summaryFunction = twoClassSummary,
+  classProbs=TRUE,
+  allowParallel=TRUE
+  )
+
+#tgControl <- expand.grid(
+#  .mtry = 5
+#)
+
+model_svm <- train(
+  survived ~ . , data = titanic_train,
+  method = "svmLinear",
+  trControl = trainControl,
+  #verbose = FALSE,
+  tuneLength = 5,
+  metric = "ROC"
+)
+
+model_svm
+```
+
+
+```{r evaluate-svm-model}
+probabilitiesSelf <- predict(model_svm, titanic_train, type="prob")
+myroc <- pROC::roc(predictor = probabilitiesSelf$surv,
+             response = titanic_train$survived,
+             levels = c("surv","died"), smooth=F)
+
+probabilitiesTest <- predict(model_svm, titanic_test, type="prob")
+testroc <- roc(predictor = probabilitiesTest$surv,
+             response = titanic_test$survived,
+             levels = c("surv","died"), smooth=F)
+
+par(mfrow=c(1,2))
+plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
+plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+```
+
+
+
