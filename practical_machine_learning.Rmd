@@ -9,294 +9,539 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r install-packages, include=FALSE}
-#note these are the packages you need to install and have ready for this practical exercise
-#
-boolPackagesPresent <- function(lop){
-  #boolean list of which function in a given list "lop" that is already installed
-  #returns a boolen iterand of which functions in "lop" are already present
-  packages.present <- (lop %in% installed.packages()[,"Package"]) 
-  return(packages.present)
-}
-installRequiredPackages <- function(lop){
-  new.packages <- lop[!boolPackagesPresent(lop)] #note negation - new packages are what is NOT installed yet
-  if(length(new.packages))
-    install.packages(new.packages) #shortcut to run through and install the list without making explicit loop
-  sapply(lop, require, character.only = TRUE) #simple "apply" is the really smart R way to loop over
-  return(lop[boolPackagesPresent(lop)])
-  #returns elements of "lop" that are now successfully installed
-}
+## Practicum introduction
 
-installRequiredPackages( c("dplyr",
-                           "magrittr",
-                           "caret", "pROC",
-                           "ggplot2"))
+1. Loading the previous practica Covid dataset
+2. Data inspection and pre-processing steps
+3. Re-coding categorical variables
+4. A logistic regression in machine learning style - regularization for dimensionality reduction
+5. A random forest model
+6. A support vector model
+
+
+## Preparation : Packages and dataset
+```{r install-packages, include=FALSE}
+#here is a small guidance to help you install CARET if you are using R commands and/or scripting
+#
+#install.packages("pacman") #package manager utility
+library(pacman)
+
+p_load("caret", "ggplot2", "dplyr", "magrittr", "readxl") #checks if I already have these packages, if not then load them
 ```
 
-## Step 1 : getting the data ready
 
-Reminder that these are steps we have already seen before to load some data and recode it slightly. Then we are also going to drop some columns which we are intentionally not going to use.
+```{r load-covidpredict, include=FALSE}
+#here is a small guidance to help you install CARET if you are using R commands and/or scripting
+#
+setPath <- 'C:/Users/leonard.wee/OneDrive - Maastro - Clinic/Bureaublad/machine_learning_in_R'
+setData <- 'covidpredict-1.xlsx'
 
-```{r head-titanic-data, include=FALSE}
-pathToData <- './' #edit this line
+original_data <- readxl::read_excel(
+  file.path(setPath,setData)
+)
 
-titanic3 <- read.csv2( file.path(pathToData,'titanic3.csv') )
+#always a good idea to give the data a row index
+original_data$id <- seq(1:nrow(original_data))
+```
 
-titanic3 <- titanic3[!is.na(titanic3$survived),]
 
-colnames(titanic3)[1] <- "pclass"
+### Checking for non-zero variance
 
-recodedTitanic <- dplyr::mutate(titanic3,
-    #
-    pclass = as.factor(pclass),
-    #
-    survived = recode_factor(survived,
-                        "1" = "surv",
-                        "0" = "died"),
-    #
-    sex = recode_factor(sex,
-                        "male" = "m",
-                        "female" = "f"),
-    #
-    age = floor(age),
-    #
-    fare = floor(fare),
-    #
-    embarked = recode_factor(embarked,
-                             "S" = "South",
-                             "Q" = "Queens",
-                             "C" = "Cherb",
-                             .default = "Unknown"),
-    #
-    cabin = gsub("^$","X",cabin),
-    cabin = as.factor( substr(cabin,1,1) )
+```{r check-nonZeroVariance, include=FALSE}
+nzv <- caret::nearZeroVar(original_data, saveMetrics= TRUE)
+print(nzv)
+```
+
+This prints out a table showing whether each column has some variation or not. That is, it is not just all the same (or close) values.
+
+### Checking for any missing values
+
+```{r check-missing, include=FALSE}
+# count the missing values by column wise
+print("Count of missing values by column wise")
+sapply(original_data, function(x) sum(is.na(x)))
+
+# find location of missing values column wise
+print("Position of missing values by column wise")
+sapply(original_data, function(x) which(is.na(x)))
+```
+
+Some machine learning procedures can work with missing values, so you do not need to impute them. Others (such as the methods with generalized regression at the core) will not handle missing values, so you have to deal with them in some way.
+
+The decision to impute missing values or to use complete-cases analysis is a tricky one. There is no magic rule here, you have to weigh up the possible benefits of filling in the missing values versus what might be increased risk of error by doing the imputation. There is also the discussion about whether or not you should include the dependent variable (here it happens to be mortality) into the imputation of the other missing values.
+
+### Inserting missing values and then re-imputing them back again
+
+In this section, we will go through the SIMULATION of missing values because the covidpredict-1 dataset did not have any missing. The steps are - first we create MISSING AT RANDOM values and then we try to impute them back in. Here we are going to intentionally create a random scatter of missing values of 30% in each column, except age and female sex and mortality.
+
+```{r generates-missing, include=FALSE}
+#uses the library missMethods
+#install.packages("missMethods")
+library(missMethods)
+
+#original data with everything, but we will skip the date and set columns
+original_data %<>% dplyr::select(., -date, -set)
+original_data %<>% dplyr::mutate(.,
+                                 gcs = as.factor(gcs),
+                                 female = as.factor(female),
+                                 comorbidity = as.factor(comorbidity),
+                                 mortality = as.factor(mortality)
+)
+
+original_with_missing <- missMethods::delete_MCAR(original_data,
+                         0.3, #this controls the percentage of missing values
+                         c("rr", "oxygen_sat", "urea", "crp", "gcs", "comorbidity"))
+                          #these are the columns in which to create the missing values
+
+# count the missing values by column wise
+print("Count of missing values by column wise")
+sapply(original_with_missing, function(x) sum(is.na(x)))
+
+#and this is the much smaller dataset with only complete cases :
+complete_cases_only <- original_with_missing[
+  complete.cases(original_with_missing),]
+```
+
+```{r mice-imputation, include=FALSE}
+p_load("VIM","mice") #this gets us the imputation packages
+
+
+##### one of the easist errors to make during imputation is to set multi-level categoricals as
+##### numerical (continuous) variables, in which case imputation will give seemingly strange answers
+
+
+temp <- mice(
+  dplyr::select(original_with_missing, -mortality) #note here I am choosing NOT to allow imputation to use the outcome variable
+  , method = "pmm", maxit = 10, m = 10)
+#maxiter = number of iterations to fit and impute
+#m is the number of separate imputations that will be generated
+
+#now join the mortality column back and call this the imputed data
+imputated_data <- cbind(
+  mice::complete(temp,1), ##change the number from "1" to choose which imputed set you want to use
+  mortality = original_data$mortality
+)
+
+#check distribution?
+par(mfrow=c(1,2))
+plot(imputated_data$gcs)
+plot(original_data$gcs)
+
+#alternatively for continuous values try a histogram
+par(mfrow=c(1,2))
+hist(imputated_data$crp)
+hist(original_data$crp)
+
+rm(temp)
+```
+
+Note that for the dataset called "imputed_data" I have only chosen set 1 of the MICE imputation. You are of course free to choose a different set, and in the practicum we discuss other ways you might be able to use the imputed datasets.
+
+### (Multi)-collinearity
+
+Participants in the data exploration course will know that R has an easy function to investigate linear (or rank) correlations between pair-wise combinations of variables. Note that we can only do "corrplot" with numerical variables.
+
+```{r check-correlations, include=FALSE}
+library(corrplot)
+
+M <- cor(dplyr::select(original_data,
+                  rr,oxygen_sat,urea,crp,age)
+    , method=c("pearson"))
+corrplot(M, method = c("number"))
+rm(M)
+```
+
+In the preceding lecture, we had discussed whether or not removing highly correlated variables as needed or not, and why this very likely depends on the specifics of the machine learning model.
+
+### Recoding categoricals
+
+```{r setup-training-vs-test, include=FALSE}
+TEST_SET <- complete_cases_only ##here I am arbitrary choosing the complete cases as a hold-out test set
+
+TRAIN_SET <- dplyr::anti_join(imputated_data, complete_cases_only, by = "id")
+#the imputed data contains both the imputed missing and the complete cases
+#I do not want the overlap in the complete cases, so I "anti" join this ie take the SET complement
+```
+
+
+```{r categoricals-setup}
+#mortality is the outcome variable which is binary 0 or 1 - R needs this as a non-number!
+
+#female sex is already binary as 0 and 1 - R needs this as a non-number
+
+# ---------------- but what about GCS and COMORBIDITIES?
+#GCS runs from 3 to 15 but is very highly skewed
+#if you look at GCS, we can recode this as :
+#
+#    Severe: GCS 3-8 
+#    Moderate: GCS 9-12
+#    Mild: GCS 13-15
+#
+#Likewise the number of comorbidities are 0 or 1 or 2
+#
+#this suggests a plan to convert GCS to a factored variable
+#
+#also factored comorbidity
+#
+#we implement this with the recode factor step out of the dplyr bag of tools :
+TRAIN_SET %<>% dplyr::mutate(.,
+                             fac_comorb = recode_factor(comorbidity,
+                                               '2' = 'two',
+                                               '1' = 'one',
+                                               '0' = 'none')
+)
+
+TRAIN_SET$gcs <- as.numeric(as.character(TRAIN_SET$gcs))
+
+TRAIN_SET %<>% dplyr::mutate(.,
+                             #the "cut" command in R is extremely useful for splitting values that
+                             #are actually discrete grades like clinical staging or coma scales
+                             fac_gcs = cut(gcs,c(0,8,12,15),c("severe","moderate","mild")),
+                             #
+                             female = recode_factor(female,
+                                             '1' = 'female',
+                                             '0' = 'male'),
+                             mortality = recode_factor(mortality,
+                                                       '0' = 'alive',
+                                                       '1' = 'dead')
+)
+
+#remove the columns no longer needed
+TRAIN_SET$gcs <- NULL
+TRAIN_SET$comorbidity <- NULL
+
+#IMPORTANT : Whatever is done to TRAIN must be done to TEST as well :
+TEST_SET %<>% dplyr::mutate(.,
+                            fac_comorb = recode_factor(comorbidity,
+                                              '2' = 'two',
+                                              '1' = 'one',
+                                              '0' = 'none')
+)
+
+TEST_SET$gcs <- as.numeric(as.character(TEST_SET$gcs))
+
+TEST_SET %<>% dplyr::mutate(.,
+                            #the "cut" command in R is extremely useful for splitting values that
+                            #are actually discrete grades like clinical staging or coma scales
+                            fac_gcs = cut(gcs,c(0,8,12,15),c("severe","moderate","mild")),
+                            #
+                            female = recode_factor(female,
+                                             '1' = 'female',
+                                             '0' = 'male'),
+                            mortality = recode_factor(mortality,
+                                                       '0' = 'alive',
+                                                       '1' = 'dead')
+)
+
+#remove the columns no longer needed
+TEST_SET$gcs <- NULL
+TEST_SET$comorbidity <- NULL
+
+#I no longer need the ID column
+TEST_SET$id <- NULL
+TRAIN_SET$id <- NULL
+```
+
+
+## Examine three MACHINE LEARNING MODELS in detail
+
+
+### REGULARIZED LOGISTIC REGRESSION
+
+You already tried to make a logistic regression model in the previous practica, but let's try to see how we might do it from the Machine Learning perspective.
+
+
+```{r glmnet-setup-hyperparameters}
+trainControl <- trainControl(
+  method = "repeatedcv",                     #repeated internal cross-validation
+  number = 10,                               #10-fold cross-validation
+  repeats = 10,                              #10 repeats of each folding experiment
+  summaryFunction = twoClassSummary,#needed if you want to plot a ROC curve
+  classProbs=TRUE, #needed if you want to plot a ROC curve
+  #
+  #search = "random"          #uncomment this line AND the TuneLength line if you want a random search
   )
 
-recodedTitanic <- dplyr::select(recodedTitanic,
-                                -name,
-                                -ticket,
-                                -boat,
-                                -body,
-                                -home.dest
-  
+#### here is the HYPER PARAMETER TUNING GRID
+tuningGrid=expand.grid(
+  alpha = seq(0, 1, length=5),             #this say alpha range from 0, 0.2, 0.4, etc. until 1.
+  lambda = seq(0.0001, 0.2, length = 20)   #this says a range of shrinkage parameters in 20 steps
 )
 ```
 
-## Step 2 : inspect missing value and try to impute
 
-In supervised machine learning, we will have to be extra careful how we handle missing values. For sure, we cannot do supervised learning with the missing label survival label, so that has to drop. Then we should perhaps think about what to do with the missing ages.
+Since there is a logistic regression in the middle of this machine learning model, all of the usual steps we did for classical modelling would be of use here once again.
 
-```{r first summary}
-summary(recodedTitanic)
-```
+```{r glmnet-splitting}
+set.seed(1)  #pay attention to the random number seed if you want to REPRODUCE your splits and bootstraps
 
-There is only one missing value for fare, so we will impute it based on the median fare in the same passenger class.
+#take a direct bootstrap of the TRAIN_SET
+n <- sample(1:nrow(TRAIN_SET), size = 2000,replace = TRUE) #note replace TRUE means bootstrap
 
-```{r fare-imputation, include=F}
-thisClass <- recodedTitanic$pclass[is.na(recodedTitanic$fare)]
-thisSection <- dplyr::filter(recodedTitanic, pclass == thisClass)
-medianFare = median(thisSection$fare, na.rm = T)
-recodedTitanic$fare[is.na(recodedTitanic$fare)] <- as.numeric(medianFare)
-```
+glmnet_TRAIN <- TRAIN_SET[n,]
+#runtime_TRAIN <- TRAIN_SET          ##hint : this uses the whole of the training set
 
-There are quite a lot of missing ages, try to impute. **Be careful not to impute using the ground truth variable of survival!**
+glmnet_TEST <- TEST_SET            ##we use all of the test set as is
 
-```{r mice-imputation, include=FALSE}
-installRequiredPackages( c("VIM","mice") )
-imputation <- dplyr::select(recodedTitanic, -survived)
-temp <- mice(imputation, method = "pmm")
-imputation <- complete(temp,1)
-```
-
-```{r check-imputation}
-#check distribution
-par(mfrow=c(1,2))
-plot(imputation$age)
-plot(recodedTitanic$age)
-```
-
-```{r last summary}
-imputedTitanic <- imputation
-imputedTitanic$survived <- recodedTitanic$survived
-summary(imputedTitanic)
-rm(imputation, temp, thisClass, thisSection, medianFare)
-```
-
-Now we can see that our data frame is complete and ready for machine learning.
-
-## Step 3 : Logistic regression in machine learning style ("Elastic Net")
-
-```{r split-titanic-dataset}
-library(caret) #checks that we have it installed
-
-set.seed(999) #if we want to get the same quasi random splits every time
-
-#in machine learning we often divide up the data into a set that will train the machine model
-#and then test it in a set that the machine model has not ever seen yet
-inTrain <- createDataPartition(imputedTitanic$survived, p = 0.80, list = F)
-titanic_train <- imputedTitanic[ inTrain, ]
-titanic_test <- imputedTitanic[ -inTrain, ]
-rm(inTrain)
-```
-
-```{r glmnet-titanic-model}
-trainControl <- trainControl(
-  method = "repeatedcv", #repeated internal cross-validation
-  number = 10, #10-fold cross-validation
-  repeats = 10, #10 repeats of each fold
-  search = "random",
-  summaryFunction = twoClassSummary,
-  classProbs=TRUE
+##NOTE WELL :  ####### centre and rescale continuous numerical variable is recommended for regressions
+#CARET has a special function for this :
+preprocess <- caret::preProcess(
+  dplyr::select(glmnet_TRAIN, -mortality, -fac_gcs, -fac_comorb, -female),
+  method = c("center", "scale")
   )
 
+#now apply the preprocessing to the training set AND to the test set
+glmnet_TRAIN %<>% predict(preprocess, .)
+glmnet_TEST %<>% predict(preprocess, .)
+
+rm(preprocess)
+
+#
+# finally we're ready to train a model!
 model_glmnet <- train(
-  survived ~ . , data = titanic_train,
+  mortality ~ . ,
+  data = glmnet_TRAIN,
   method = "glmnet",
   trControl = trainControl,
   verbose = FALSE,
-  tuneLength = 5,
+  tuneGrid = tuningGrid,     #this is if you specify a grid search of alpha-lambda hyperparameters
+  #tuneLength = 25,          #uncoment this to do a random search of hyperparameters
   metric = "ROC"
 )
 
-model_glmnet
+plot(model_glmnet)
 ```
+
+
+To get the coefficients of the model, we ask R for the optimal hyper-parameters and roll this into the trained model.
+
+Question : How does this compare with the model you got from your earlier practica?
+
+
+```{r coefficients-glmnet-model}
+coef(model_glmnet$finalModel, s = model_glmnet$bestTune$lambda)
+```
+
+
+Some exercises we can try :
+
+* switch from grid search to random search - do we land in a different place with another set of hyper-parameters?
+
+* go back up to the the bootstrap of the training set, change the random number generator seed, then repeat - does anything change? 
+
+* how would you force glmnet to run with a FIXED VALUE of alpha and lambda - hint look at tuneGrid above.
+
 
 ```{r evaluate-glmnet-model}
-probabilitiesSelf <- predict(model_glmnet, titanic_train, type="prob")
-myroc <- roc(predictor = probabilitiesSelf$surv,
-             response = titanic_train$survived,
-             levels = c("surv","died"), smooth=F)
+probabilitiesSelf <- predict(model_glmnet, glmnet_TRAIN, type="prob")
+myroc <- pROC::roc(predictor = probabilitiesSelf$alive,
+             response = glmnet_TRAIN$mortality,
+             levels = c("alive","dead"), smooth=F)
 
-probabilitiesTest <- predict(model_glmnet, titanic_test, type="prob")
-testroc <- roc(predictor = probabilitiesTest$surv,
-             response = titanic_test$survived,
-             levels = c("surv","died"), smooth=F)
+probabilitiesTest <- predict(model_glmnet, glmnet_TEST, type="prob")
+testroc <- pROC::roc(predictor = probabilitiesTest$alive,
+             response = glmnet_TEST$mortality,
+             levels = c("alive","dead"), smooth=F)
 
 par(mfrow=c(1,2))
-plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
-plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+pROC::plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
+pROC::plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+
+rm(probabilitiesSelf, probabilitiesTest, myroc, testroc)
 ```
 
-## Step 4 : Tree-based classifier (Recursive Partitioning "RPART")
 
-This is one of the simplest models to build and there are actually no tuning parameters to steer the machine learning.
 
-```{r tree-titanic-model}
+### RANDOM FOREST
+
+We are actually going to START this with one of the simplest models to build ie a TREE, and there are actually no tuning of hyper-parameters.
+
+```{r tree-model-hyper-parameters}
 trainControl <- trainControl(
   method = "repeatedcv", #repeated internal cross-validation
-  number = 10, #10-fold cross-validation
-  repeats = 10, #10 repeats of each fold
-  #search = "random",
+  number = 10,                                  #10-fold cross-validation
+  repeats = 10,                                 #10 repeats of each fold
   summaryFunction = twoClassSummary,
   classProbs=TRUE
   )
 
-model_rpart <- train(
-  survived ~ . , data = titanic_train,
-  method = "rpart",
+#notice no tuning grid!
+
+```
+
+```{r tree-splitting}
+set.seed(1) ##I kept the same seed here to get the same 200o bootstrap, you should try changing it later
+
+#take a direct bootstrap of the TRAIN_SET
+n <- sample(1:nrow(TRAIN_SET), size = 2000,replace = TRUE) #note replace TRUE means bootstrap
+
+tree_TRAIN <- TRAIN_SET[n,]
+tree_TEST <- TEST_SET
+
+# finally we're ready to train a model!
+model_tree <- train(
+  mortality ~ .,
+  data = tree_TRAIN,
+  method = "rpart",                  #this has been changed to define a TREE model
   trControl = trainControl,
-  #verbose = FALSE,
-  #tuneLength = 5
+  #note no tuning grid because RPART has no hyper-parameters
   metric = "ROC"
 )
 
-installRequiredPackages(c("rpart.plot"))
-rpart.plot(model_rpart$finalModel)
+library(rpart.plot)
+rpart.plot(model_tree$finalModel)
 ```
+
+
+Inspect the tree plot, what do you think? Can you make sense of it? Did it follow your expected logic, or not?
 
 
 ```{r evaluate-tree-model}
-probabilitiesSelf <- predict(model_rpart, titanic_train, type="prob")
-myroc <- roc(predictor = probabilitiesSelf$surv,
-             response = titanic_train$survived,
-             levels = c("surv","died"), smooth=F)
+probabilitiesSelf <- predict(model_tree, tree_TRAIN, type="prob")
+myroc <- pROC::roc(predictor = probabilitiesSelf$alive,
+             response = tree_TRAIN$mortality,
+             levels = c("alive","dead"), smooth=F)
 
-probabilitiesTest <- predict(model_rpart, titanic_test, type="prob")
-testroc <- roc(predictor = probabilitiesTest$surv,
-             response = titanic_test$survived,
-             levels = c("surv","died"), smooth=F)
+probabilitiesTest <- predict(model_tree, tree_TEST, type="prob")
+testroc <- pROC::roc(predictor = probabilitiesTest$alive,
+             response = tree_TEST$mortality,
+             levels = c("alive","dead"), smooth=F)
 
 par(mfrow=c(1,2))
-plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
-plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+pROC::plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
+pROC::plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+
+rm(probabilitiesSelf, probabilitiesTest, myroc, testroc)
 ```
 
 
-## Step 5 : Random forest classifier ("rf")
+Now let's get to work on a RANDOM FOREST classifier that will have a couple of hyper-parameters that we can try to tune.
 
-The random forest classifier here is going to be based on an ensemble of 2000 trees, each with a randomly-picked subset of 5 out of the 8 available variables.
 
-```{r rf-titanic-model}
+```{r forest-setup-hyperparameters}
 trainControl <- trainControl(
   method = "repeatedcv", #repeated internal cross-validation
-  number = 10, #10-fold cross-validation
-  repeats = 10, #10 repeats of each fold
-  #search = "random",
-  summaryFunction = twoClassSummary,
-  classProbs=TRUE,
-  allowParallel=TRUE
+  number = 10,                                #10-fold cross-validation
+  repeats = 10,                               #10 repeats of each fold
+  allowParallel=FALSE,                        #try true if your computer supports parallel computing
+  summaryFunction = twoClassSummary,#needed if you want to plot a ROC curve
+  classProbs=TRUE, #needed if you want to plot a ROC curve
+  #
+  #search = "random"          #uncomment this line AND the TuneLength line if you want a random search
   )
 
-tgControl <- expand.grid(
-  .mtry = 5
+#### here is the HYPER PARAMETER TUNING GRID
+tuningGrid=expand.grid(
+  .mtry = 5 #this hyperparameter says every tree sample 5 of the variables available
 )
+```
 
+
+```{r forest-splitting}
+set.seed(1)
+
+#take a direct bootstrap of the TRAIN_SET
+n <- sample(1:nrow(TRAIN_SET), size = 2000,replace = TRUE) #note replace TRUE means bootstrap
+
+forest_TRAIN <- TRAIN_SET[n,]
+forest_TEST <- TEST_SET
+
+#notice again we don't need the centering and scaling of the continuous 
+
+#
+# finally we're ready to train a model!
 model_forest <- train(
-  survived ~ . , data = titanic_train,
+  mortality ~ . ,
+  data = forest_TRAIN,
   method = "rf",
   trControl = trainControl,
-  #verbose = FALSE,
-  #tuneLength = 5
-  metric = "ROC",
-  tuneGrid = tgControl,
-  num.trees = 2000
+  num.trees = 500,            # --- this hyperparameter will make a forest of 500 trees
+  #
+  tuneGrid = tuningGrid,
+  #tuneLength = 25, #not needed unless you want to do a random walk tuning of hyperparameters
+  metric = "ROC"
 )
 
 model_forest
 ```
 
-```{r evaluate-forest-model}
-probabilitiesSelf <- predict(model_forest, titanic_train, type="prob")
-myroc <- roc(predictor = probabilitiesSelf$surv,
-             response = titanic_train$survived,
-             levels = c("surv","died"), smooth=F)
 
-probabilitiesTest <- predict(model_forest, titanic_test, type="prob")
-testroc <- roc(predictor = probabilitiesTest$surv,
-             response = titanic_test$survived,
-             levels = c("surv","died"), smooth=F)
+Here we hit a pretty important problem in machine learning. Highly complex or ensemble models like random forest are really NOT AT ALL easy to understand or interpret. We will try to address this with SHAP additive explanations, that will come later at the end.
+
+For now, try a few experiments :
+
+- switch to a random search of "mtry" hyperparameter?
+
+- can you figure out how to set a grid for mtry, so that we check 3, 4 and 5 variables per tree?
+
+- what happens if we change only the number of trees in the forest?
+
+
+```{r evaluate-forest-model}
+probabilitiesSelf <- predict(model_forest, forest_TRAIN, type="prob")
+myroc <- pROC::roc(predictor = probabilitiesSelf$alive,
+             response = forest_TRAIN$mortality,
+             levels = c("alive","dead"), smooth=F)
+
+probabilitiesTest <- predict(model_forest, forest_TEST, type="prob")
+testroc <- pROC::roc(predictor = probabilitiesTest$alive,
+             response = forest_TEST$mortality,
+             levels = c("alive","dead"), smooth=F)
 
 par(mfrow=c(1,2))
-plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
-plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+pROC::plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
+pROC::plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+
+rm(probabilitiesSelf, probabilitiesTest, myroc, testroc)
 ```
 
 
-## Step 6 : Support Vector Machine ("SVM")
 
-For this, we have quite some choices to make, and tuning can be a bit involved. In this example, we will only use a simple multi-linear hyperplane descriptor to cut the high-dimensional space into survived and died  regions.
+### SUPPORT VECTOR MACHINE
 
-```{r svm-titanic-model}
+
+```{r svm-setup-hyperparameters}
 trainControl <- trainControl(
-  method = "cv", #internal K-FOLD cross-validation
-  number = 10, #10-fold cross-validation
-  #repeats = 10, #10 repeats of each fold
-  search = "random",
-  summaryFunction = twoClassSummary,
-  classProbs=TRUE,
-  allowParallel=TRUE
+  method = "repeatedcv", #repeated internal cross-validation
+  number = 10,                              #10-fold cross-validation
+  repeats = 10,                             #10 repeats of each fold
+  allowParallel=FALSE,                      #try true if your computer supports parallel computing
+  summaryFunction = twoClassSummary, #needed if you want to plot a ROC curve
+  classProbs=TRUE, #needed if you want to plot a ROC curve
+  #
+  #search = "random"          #uncomment this line AND the TuneLength line if you want a random search
   )
 
-#tgControl <- expand.grid(
-#  .mtry = 5
-#)
+#### here is the HYPER PARAMETER TUNING GRID
+tuningGrid=expand.grid(
+  C = seq(0.1, 10, length=3)
+  #this hyperparameter on SVM plays with how many misclassifications are in the soft margin
+)
+```
+
+
+```{r svm-splitting}
+set.seed(1)
+
+#take a direct bootstrap of the TRAIN_SET
+n <- sample(1:nrow(TRAIN_SET), size = 2000,replace = TRUE) #note replace TRUE means bootstrap
+
+svm_TRAIN <- TRAIN_SET[n,]
+#svm_TRAIN <- TRAIN_SET ##hint : this uses the whole of the training set
+svm_TEST <- TEST_SET
+
+#notice again we don't need the centering and scaling of the continuous 
+#
+# finally we're ready to train a model!
 
 model_svm <- train(
-  survived ~ . , data = titanic_train,
+  mortality ~ . ,
+  data = svm_TRAIN,
   method = "svmLinear",
   trControl = trainControl,
-  #verbose = FALSE,
-  tuneLength = 5,
+  #
+  tuneGrid = tuningGrid,
+  #tuneLength = 25, #not needed unless you want to do a random walk tuning of hyperparameters
   metric = "ROC"
 )
 
@@ -305,122 +550,55 @@ model_svm
 
 
 ```{r evaluate-svm-model}
-probabilitiesSelf <- predict(model_svm, titanic_train, type="prob")
-myroc <- roc(predictor = probabilitiesSelf$surv,
-             response = titanic_train$survived,
-             levels = c("surv","died"), smooth=F)
+probabilitiesSelf <- predict(model_svm, svm_TRAIN, type="prob")
+myroc <- pROC::roc(predictor = probabilitiesSelf$alive,
+             response = svm_TRAIN$mortality,
+             levels = c("alive","dead"), smooth=F)
 
-probabilitiesTest <- predict(model_svm, titanic_test, type="prob")
-testroc <- roc(predictor = probabilitiesTest$surv,
-             response = titanic_test$survived,
-             levels = c("surv","died"), smooth=F)
+probabilitiesTest <- predict(model_svm, svm_TEST, type="prob")
+testroc <- pROC::roc(predictor = probabilitiesTest$alive,
+             response = svm_TEST$mortality,
+             levels = c("alive","dead"), smooth=F)
 
 par(mfrow=c(1,2))
-plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
-plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+pROC::plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
+pROC::plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
+
+rm(probabilitiesSelf, probabilitiesTest, myroc, testroc)
 ```
 
 
-## Step 7 : Simple ANN
 
-Generally speaking we would not do try to do Neural Nets in R (for this we would really need python and machines with very high parallel-processing power) but we might be able to give this a shot here.
+## Shapley Additive Explanations
+```{r shapley-test}
+#install.packages("shapper")
+p_load(shapper)
 
-```{r nnet-titanic-model}
-trainControl <- trainControl(
-  method = "cv", #internal K-FOLD cross-validation
-  number = 10, #10-fold cross-validation
-  #repeats = 10, #10 repeats of each fold
-  search = "random",
-  summaryFunction = twoClassSummary,
-  classProbs=TRUE,
-  allowParallel=TRUE
-  )
 
-#tgControl <- expand.grid(
-#  .size = c(5, 10, 15, 20),
-#  .decay = c(0.0001, 0.001, 0.01, 0.1, 1)
-#)
-
-model_nnet <- train(
-  survived ~ . , data = titanic_train,
-  method = "nnet",
-  trControl = trainControl,
-  verbose = FALSE,
-  #tuneGrid = tgControl,
-  tuneLength = 10,
-  metric = "ROC"
+#we create (or import from some other table) a example of a "new patient" here :
+test_obs <- data.frame(
+            rr = 20,
+            oxygen_sat = 95,
+            urea = 22,
+            crp = 20,
+            age = 45,
+            female = factor('female', levels = c("female", "male")),
+            fac_comorb = factor('none', levels = c("two", "one", "none")),
+            fac_gcs = factor('mild', levels = c("severe","moderate","mild"))
 )
 
-model_nnet
-```
+#to make shapley values we first need to run off the predictions on a dataset
+p_function <- function(model, data) predict(model, newdata = data, type = "prob")
 
+#the format of the shap function is this :
+ive_rf <- shapper::individual_variable_effect(
+  model_forest,                                 #the model to evaluate
+  data = dplyr::select(svm_TRAIN, -mortality),  #the dataset BUT WITHOUT THE OUTCOME!
+  predict_function = p_function,                #the abovementioned predict step
+  new_observation = test_obs                    #finally the "new patient" or made-up patients
+  )
 
-```{r evaluate-nnet-model}
-probabilitiesSelf <- predict(model_nnet, titanic_train, type="prob")
-myroc <- roc(predictor = probabilitiesSelf$surv,
-             response = titanic_train$survived,
-             levels = c("surv","died"), smooth=F)
-
-probabilitiesTest <- predict(model_nnet, titanic_test, type="prob")
-testroc <- roc(predictor = probabilitiesTest$surv,
-             response = titanic_test$survived,
-             levels = c("surv","died"), smooth=F)
-
-par(mfrow=c(1,2))
-plot.roc(myroc, legacy.axes = T, print.auc = T, col="green", print.thres = "best")
-plot.roc(testroc, legacy.axes = T, print.auc = T, col="red")
-```
-
-## step 8 : Compare the different models at the SAME operating threshold
-
-Let's assume that the operating point we want is the probability threshold of 0.5.
-
-
-```{r confusion-tree}
-predictions_tree <- ifelse(
-  predict(model_rpart, titanic_test, type="prob")$surv > 0.5, "surv", "died")
-predictions_tree <- as.factor(predictions_tree)
-confusionTREE <- confusionMatrix(predictions_tree, titanic_test$survived)
-confusionTREE$table
-#confusionTREE
-```
-
-
-```{r confusion-forest}
-predictions_forest <- ifelse(
-  predict(model_forest, titanic_test, type="prob")$surv > 0.5, "surv", "died")
-predictions_forest <- as.factor(predictions_forest)
-confusionFOREST <- confusionMatrix(predictions_forest, titanic_test$survived)
-confusionFOREST$table
-#confusionFOREST
-```
-
-
-```{r confusion-elastic-logit}
-predictions_enet <- ifelse(
-  predict(model_glmnet, titanic_test, type="prob")$surv > 0.5, "surv", "died")
-predictions_enet <- as.factor(predictions_enet)
-confusionENET <- confusionMatrix(predictions_enet, titanic_test$survived)
-confusionENET$table
-#confusionENET
-```
-
-
-```{r confusion-svm}
-predictions_svm <- ifelse(
-  predict(model_svm, titanic_test, type="prob")$surv > 0.5, "surv", "died")
-predictions_svm <- as.factor(predictions_svm)
-confusionSVM <- confusionMatrix(predictions_svm, titanic_test$survived)
-confusionSVM$table
-#confusionSVM
-```
-
-```{r confusion-nnet}
-predictions_nnet <- ifelse(
-  predict(model_nnet, titanic_test, type="prob")$surv > 0.5, "surv", "died")
-predictions_nnet <- as.factor(predictions_nnet)
-confusionNNET <- confusionMatrix(predictions_nnet, titanic_test$survived)
-confusionNNET$table
-#confusionNNET
+ive_rf #output the result for 1 patient and for now we have to inspect the text output
+##### PS the plot function in shapper has been broken since Nov 2022 - issue has been logged
 ```
 
