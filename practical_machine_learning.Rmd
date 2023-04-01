@@ -33,7 +33,7 @@ p_load("caret", "ggplot2", "dplyr", "magrittr", "readxl") #checks if I already h
 ```{r load-covidpredict, include=FALSE}
 #here is a small guidance to help you install CARET if you are using R commands and/or scripting
 #
-setPath <- 'C:/Users/leonard.wee/OneDrive - Maastro - Clinic/Bureaublad/machine_learning_in_R'
+setPath <- 'C:/Users/leonard.wee/OneDrive - Maastro - Clinic/R_Teaching_Coursework/machine_learning_in_R'
 setData <- 'covidpredict-1.xlsx'
 
 original_data <- readxl::read_excel(
@@ -514,7 +514,7 @@ trainControl <- trainControl(
 
 #### here is the HYPER PARAMETER TUNING GRID
 tuningGrid=expand.grid(
-  C = seq(0.1, 10, length=3)
+  C = seq(0.1, 5, length=5)
   #this hyperparameter on SVM plays with how many misclassifications are in the soft margin
 )
 ```
@@ -593,7 +593,7 @@ p_function <- function(model, data) predict(model, newdata = data, type = "prob"
 #the format of the shap function is this :
 ive_rf <- shapper::individual_variable_effect(
   model_forest,                                 #the model to evaluate
-  data = dplyr::select(svm_TRAIN, -mortality),  #the dataset BUT WITHOUT THE OUTCOME!
+  data = dplyr::select(forest_TRAIN, -mortality),  #the dataset BUT WITHOUT THE OUTCOME!
   predict_function = p_function,                #the abovementioned predict step
   new_observation = test_obs                    #finally the "new patient" or made-up patients
   )
